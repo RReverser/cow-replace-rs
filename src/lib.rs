@@ -30,15 +30,15 @@ pub trait Pattern<'s> {
 }
 
 macro_rules! impl_pattern {
-	($ty:ty $(where $($bound:tt)*)?) => {
-		impl<'s $(, $($bound)*)?> Pattern<'s> for $ty {
-			type MatchIndices = std::str::MatchIndices<'s, Self>;
+    ($ty:ty $(where $($bound:tt)*)?) => {
+        impl<'s $(, $($bound)*)?> Pattern<'s> for $ty {
+            type MatchIndices = std::str::MatchIndices<'s, Self>;
 
-			fn match_indices_in(self, s: &'s str) -> Self::MatchIndices {
-				s.match_indices(self)
-			}
-		}
-	};
+            fn match_indices_in(self, s: &'s str) -> Self::MatchIndices {
+                s.match_indices(self)
+            }
+        }
+    };
 }
 
 #[cfg(not(feature = "nightly"))]
