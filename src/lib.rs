@@ -30,15 +30,15 @@ pub trait Pattern<'s> {
 }
 
 macro_rules! impl_pattern {
-	($ty:ty $(where $($bound:tt)*)?) => {
-		impl<'s $(, $($bound)*)?> Pattern<'s> for $ty {
-			type MatchIndices = std::str::MatchIndices<'s, Self>;
+    ($ty:ty $(where $($bound:tt)*)?) => {
+        impl<'s $(, $($bound)*)?> Pattern<'s> for $ty {
+            type MatchIndices = std::str::MatchIndices<'s, Self>;
 
-			fn match_indices_in(self, s: &'s str) -> Self::MatchIndices {
-				s.match_indices(self)
-			}
-		}
-	};
+            fn match_indices_in(self, s: &'s str) -> Self::MatchIndices {
+                s.match_indices(self)
+            }
+        }
+    };
 }
 
 #[cfg(not(feature = "nightly"))]
@@ -60,16 +60,20 @@ impl_pattern!(P where P: std::str::pattern::Pattern<'s>);
 /// This helper trait provides drop-in variants of such methods, but
 /// instead avoids allocations when no modification is necessary.
 ///
-/// For now only implemented for [`&str`](str) and returns
-/// [`Cow<str>`](std::borrow::Cow), but in the future might be extended
+/// For now implemented for [`&str`][str] and [`Cow<str>`][Cow]
+/// which both return [`Cow<str>`][Cow], but in the future might be extended
 /// to other types.
 pub trait CowUtils<'s> {
     type Output;
 
     /// Replaces all matches of a pattern with another string.
-    fn cow_replace(self, pattern: impl Pattern<'s>, to: &str) -> Self::Output;
+    fn cow_replace<P>(self, pattern: P, to: &str) -> Self::Output
+    where
+        P: for<'p> Pattern<'p>;
     /// Replaces first N matches of a pattern with another string.
-    fn cow_replacen(self, from: impl Pattern<'s>, to: &str, count: usize) -> Self::Output;
+    fn cow_replacen<P>(self, pattern: P, to: &str, count: usize) -> Self::Output
+    where
+        P: for<'p> Pattern<'p>;
     /// Returns a copy of this string where each character is mapped to its
     /// ASCII lower case equivalent.
     fn cow_to_ascii_lowercase(self) -> Self::Output;
@@ -115,7 +119,10 @@ impl<'s> CowUtils<'s> for &'s str {
     /// assert_matches!("abc".cow_replace("b", "d"), Cow::Owned(s) if s == "adc");
     /// assert_matches!("$a$b$".cow_replace("$", ""), Cow::Owned(s) if s == "ab");
     /// ```
-    fn cow_replace(self, pattern: impl Pattern<'s>, to: &str) -> Self::Output {
+    fn cow_replace<P>(self, pattern: P, to: &str) -> Self::Output
+    where
+        P: for<'p> Pattern<'p>,
+    {
         unsafe { cow_replace(self, pattern.match_indices_in(self), to) }
     }
 
@@ -132,7 +139,10 @@ impl<'s> CowUtils<'s> for &'s str {
     /// assert_matches!("aaaaa".cow_replacen("a", "b", 0), Cow::Borrowed("aaaaa"));
     /// assert_matches!("abc".cow_replacen("b", "d", 1), Cow::Owned(s) if s == "adc");
     /// ```
-    fn cow_replacen(self, pattern: impl Pattern<'s>, to: &str, count: usize) -> Self::Output {
+    fn cow_replacen<P>(self, pattern: P, to: &str, count: usize) -> Self::Output
+    where
+        P: for<'p> Pattern<'p>,
+    {
         unsafe { cow_replace(self, pattern.match_indices_in(self).take(count), to) }
     }
 
@@ -240,10 +250,115 @@ impl<'s> CowUtils<'s> for &'s str {
     }
 }
 
+/// This implementation allows chaining calls to `CowUtils` methods.
+impl<'s> CowUtils<'s> for Cow<'s, str> {
+    type Output = Cow<'s, str>;
+
+    fn cow_replace<P>(self, pattern: P, to: &str) -> Self::Output
+    where
+        P: for<'p> Pattern<'p>,
+    {
+        lift(self, move |src| src.cow_replace(pattern, to))
+    }
+
+    fn cow_replacen<P>(self, pattern: P, to: &str, count: usize) -> Self::Output
+    where
+        P: for<'p> Pattern<'p>,
+    {
+        lift(self, move |src| src.cow_replacen(pattern, to, count))
+    }
+
+    fn cow_to_ascii_lowercase(self) -> Self::Output {
+        lift(self, |src| src.cow_to_ascii_lowercase())
+    }
+
+    fn cow_to_lowercase(self) -> Self::Output {
+        lift(self, |src| src.cow_to_lowercase())
+    }
+
+    fn cow_to_ascii_uppercase(self) -> Self::Output {
+        lift(self, |src| src.cow_to_ascii_uppercase())
+    }
+
+    fn cow_to_uppercase(self) -> Self::Output {
+        lift(self, |src| src.cow_to_uppercase())
+    }
+}
+
+fn lift(src: Cow<'_, str>, op: impl FnOnce(&str) -> Cow<'_, str>) -> Cow<'_, str> {
+    match src {
+        Cow::Borrowed(src) => op(src),
+        Cow::Owned(src) => Cow::Owned(op(&src).into_owned()),
+    }
+}
+
 fn changes_when_lowercased(c: char) -> bool {
     !core::iter::once(c).eq(c.to_lowercase())
 }
 
 fn changes_when_uppercased(c: char) -> bool {
     !core::iter::once(c).eq(c.to_uppercase())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use assert_matches::assert_matches;
+
+    #[test]
+    fn chain_replace() {
+        fn lowercase_then_replace(src: &str) -> Cow<'_, str> {
+            src.cow_to_ascii_lowercase().cow_replace("foo", "bar")
+        }
+        assert_matches!(lowercase_then_replace("FOO"), Cow::Owned(s) if s == "bar");
+        assert_matches!(lowercase_then_replace("baz"), Cow::Borrowed("baz"));
+    }
+
+    #[test]
+    fn chain_replacen() {
+        fn lowercase_then_replacen(src: &str) -> Cow<'_, str> {
+            src.cow_to_ascii_lowercase().cow_replacen("foo", "bar", 1)
+        }
+        assert_matches!(lowercase_then_replacen("FOO"), Cow::Owned(s) if s == "bar");
+        assert_matches!(lowercase_then_replacen("baz"), Cow::Borrowed("baz"));
+    }
+
+    #[test]
+    fn chain_to_ascii_lowercase() {
+        fn replace_then_ascii_lowercase(src: &str) -> Cow<'_, str> {
+            src.cow_replace("FOO", "bar").cow_to_ascii_lowercase()
+        }
+        assert_matches!(replace_then_ascii_lowercase("FOO"), Cow::Owned(s) if s == "bar");
+        assert_matches!(replace_then_ascii_lowercase("baz"), Cow::Borrowed("baz"));
+    }
+
+    #[test]
+    fn chain_to_lowercase() {
+        fn replace_then_lowercase(src: &str) -> Cow<'_, str> {
+            src.cow_replace("FOO", "bar").cow_to_lowercase()
+        }
+        assert_matches!(replace_then_lowercase("FOO"), Cow::Owned(s) if s == "bar");
+        assert_matches!(replace_then_lowercase("baz"), Cow::Borrowed("baz"));
+    }
+
+    #[test]
+    fn chain_to_ascii_uppercase() {
+        fn replace_then_ascii_uppercase(src: &str) -> Cow<'_, str> {
+            src.cow_replace("foo", "BAR").cow_to_ascii_uppercase()
+        }
+
+        assert_matches!(replace_then_ascii_uppercase("foo"), Cow::Owned(s) if s == "BAR");
+        assert_matches!(replace_then_ascii_uppercase("BAZ"), Cow::Borrowed("BAZ"));
+    }
+
+    #[test]
+    fn chain_to_uppercase() {
+        fn replace_then_uppercase(src: &str) -> Cow<'_, str> {
+            src.cow_replace("foo", "BAR").cow_to_uppercase()
+        }
+
+        assert_matches!(replace_then_uppercase("foo"), Cow::Owned(s) if s == "BAR");
+        assert_matches!(replace_then_uppercase("BAZ"), Cow::Borrowed("BAZ"));
+    }
 }
